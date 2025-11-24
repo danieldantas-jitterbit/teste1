@@ -151,7 +151,8 @@ jobs:
           echo "Last Tag: $latest_tag"
 
           IFS='.' read -ra components <<< "$latest_tag"
-          components[-1]=$((${components[-1]} + 1))
+          last_index=$((${#components[@]} - 1))
+          components[$last_index]=$((${components[$last_index]} + 1))
           incremented_tag="${components[*]}"
           incremented_tag=${incremented_tag// /.}
 
@@ -160,7 +161,8 @@ jobs:
           do
             last_existing_tag=$incremented_tag
             IFS='.' read -ra components <<< "$incremented_tag"
-            components[-1]=$((${components[-1]} + 1))
+            last_index=$((${#components[@]} - 1))
+            components[$last_index]=$((${components[$last_index]} + 1))
             incremented_tag="${components[*]}"
             incremented_tag=${incremented_tag// /.}
           done
@@ -175,9 +177,10 @@ jobs:
           version=${{ steps.get_latest_release.outputs.latest }}
           echo "Updating tag: $version"
           IFS='.' read -ra arr <<< "$version"
-          last=${arr[-1]}
+          last_index=$((${#arr[@]} - 1))
+          last=${arr[$last_index]}
           ((last++))
-          arr[-1]=$last
+          arr[$last_index]=$last
           new_version=$(IFS='.'; echo "${arr[*]}")
           echo "new_tag=$new_version" >> "$GITHUB_OUTPUT"
 
