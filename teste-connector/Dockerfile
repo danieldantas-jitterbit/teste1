@@ -1,5 +1,4 @@
 FROM python:3.10-slim
-
 WORKDIR /app
 #COPY queue_exporter.py /app/
 RUN pip install flask requests
