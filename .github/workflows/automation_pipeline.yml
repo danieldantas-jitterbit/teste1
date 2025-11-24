@@ -133,17 +133,26 @@ jobs:
           echo "Release Label: $release_label"
 
           if [ -z "$release_label" ]; then
-            latest_tag=$(git describe --tags $(git rev-list --tags --max-count=1))
+            latest_tag=$(git describe --tags $(git rev-list --tags --max-count=1) 2>/dev/null || true)
+            if [ -z "$latest_tag" ]; then
+              echo "Nenhuma tag encontrada no repositório. Iniciando em 0.0.0.-1"
+              latest_tag="0.0.0.-1"
+            fi
           else
             release_prefix=${release_label#rel: }
             echo "Release Prefix: $release_prefix"
             latest_tag=$(git tag -l "${release_prefix}.*" | sort -V | tail -n 1)
+            if [ -z "$latest_tag" ]; then
+              echo "Nenhuma tag encontrada para $release_prefix. Criando a primeira com final .0"
+              latest_tag="${release_prefix}.-1"
+            fi
           fi
 
           echo "Last Tag: $latest_tag"
 
           IFS='.' read -ra components <<< "$latest_tag"
-          components[-1]=$((${components[-1]} + 1))
+          last_index=$((${#components[@]} - 1))
+          components[$last_index]=$((${components[$last_index]} + 1))
           incremented_tag="${components[*]}"
           incremented_tag=${incremented_tag// /.}
 
@@ -152,7 +161,8 @@ jobs:
           do
             last_existing_tag=$incremented_tag
             IFS='.' read -ra components <<< "$incremented_tag"
-            components[-1]=$((${components[-1]} + 1))
+            last_index=$((${#components[@]} - 1))
+            components[$last_index]=$((${components[$last_index]} + 1))
             incremented_tag="${components[*]}"
             incremented_tag=${incremented_tag// /.}
           done
@@ -163,16 +173,39 @@ jobs:
       - name: Increment Tag
         if: success() && github.event_name != 'workflow_dispatch' && env.noModulesChanged == 'false'
         id: increment_tag
+        shell: bash
         run: |
-          version=${{ steps.get_latest_release.outputs.latest }}
-          echo "Updating tag: $version"
-          IFS='.' read -ra arr <<< "$version"
-          last=${arr[-1]}
-          ((last++))
-          arr[-1]=$last
-          new_version=$(IFS='.'; echo "${arr[*]}")
-          echo "new_tag=$new_version" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          echo "[increment_tag] Starting increment"
+          version="${{ steps.get_latest_release.outputs.latest }}"
+          echo "[increment_tag] Raw version: '$version'"
+          version="$(echo "$version" | tr -d '\r\n' | xargs || true)"
+          echo "[increment_tag] Sanitized version: '$version'"
+          if [ -z "$version" ]; then
+            echo "Base version is empty; check get_latest_release."
+            exit 1
+          fi
 
+          IFS='.' read -r -a parts <<< "$version"
+          length=${#parts[@]}
+          echo "[increment_tag] Split parts (${length}): ${parts[*]}"
+          if [ "$length" -eq 0 ]; then
+            echo "Could not split version '$version'."
+            exit 1
+          fi
+
+          last_index=$((length - 1))
+          last_component="${parts[$last_index]}"
+          echo "[increment_tag] Last component before increment: '$last_component'"
+          if ! [[ "$last_component" =~ ^[0-9]+$ ]]; then
+            echo "Last component '$last_component' in version '$version' is not numeric."
+            exit 1
+          fi
+
+          parts[$last_index]=$((last_component + 1))
+          new_version=$(IFS='.'; echo "${parts[*]}")
+          echo "[increment_tag] Generated new version: $new_version"
+          echo "new_tag=$new_version" >> "$GITHUB_OUTPUT"
       - name: Determine Release Tag
         if: success() && env.noModulesChanged == 'false'
         id: determine_release_tag
@@ -253,6 +286,60 @@ jobs:
           git config --local user.name "Jitterbot"
           git tag ${{ steps.increment_tag.outputs.new_tag }}
           git push origin ${{ steps.increment_tag.outputs.new_tag }}
+
+      - name: Create GitHub Releases per Connector
+        if: success() && env.noModulesChanged == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          connectors="${{ steps.list_modules.outputs.modules }}"
+          if [ -z "$connectors" ]; then
+            connectors="${{ steps.list_modules_manual.outputs.modules }}"
+          fi
+
+          if [ -z "$connectors" ]; then
+            echo "No connectors available to create releases."
+            exit 0
+          fi
+
+          release_tag="${{ steps.determine_release_tag.outputs.value }}"
+          if [ -z "$release_tag" ]; then
+            echo "Release tag is empty. Cannot create releases."
+            exit 1
+          fi
+
+          repo="${{ github.repository }}"
+          IFS=',' read -r -a modules <<< "$connectors"
+
+          for module in "${modules[@]}"; do
+            module="$(echo "$module" | xargs)"
+            [ -z "$module" ] && continue
+            module_name="$(basename "$module")"
+            tag_name="${release_tag}"
+            release_name="${release_tag} - ${module_name}"
+            echo "Creating release $release_name (tag: $tag_name)"
+
+            payload=$(printf '{"tag_name":"%s","target_commitish":"%s","name":"%s","body":"Automated release for connector %s built from tag %s.","draft":false,"prerelease":false}' "$tag_name" "${GITHUB_SHA}" "$release_name" "$module_name" "$release_tag")
+
+            response=$(curl -s -o response.json -w "%{http_code}" \
+              -X POST \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/$repo/releases" \
+              -d "$payload")
+
+            if [ "$response" -eq 201 ]; then
+              echo "Release $release_name created."
+            elif [ "$response" -eq 422 ]; then
+              echo "Release $release_name already exists. Skipping."
+            else
+              echo "Failed to create release $release_name (status $response):"
+              cat response.json
+              exit 1
+            fi
+          done
 
       - name: Tag Checkout
         id: checkout_tag
