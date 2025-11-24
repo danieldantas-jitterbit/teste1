@@ -197,7 +197,7 @@ jobs:
           last_index=$((length - 1))
           last_component="${parts[$last_index]}"
           echo "[increment_tag] Last component before increment: '$last_component'"
-          if ! [[ "$last_component" =~ ^[0-9]+$ ]]; then
+          if ! [[ "$last_component" =~ ^-?[0-9]+$ ]]; then
             echo "Last component '$last_component' in version '$version' is not numeric."
             exit 1
           fi
@@ -317,7 +317,7 @@ jobs:
             module="$(echo "$module" | xargs)"
             [ -z "$module" ] && continue
             module_name="$(basename "$module")"
-            tag_name="${release_tag}"
+            tag_name="${release_tag}-${module_name}"
             release_name="${release_tag} - ${module_name}"
             echo "Creating release $release_name (tag: $tag_name)"
 
