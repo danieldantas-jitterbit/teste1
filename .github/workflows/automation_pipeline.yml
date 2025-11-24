@@ -321,17 +321,7 @@ jobs:
             release_name="${release_tag} - ${module_name}"
             echo "Creating release $release_name (tag: $tag_name)"
 
-            payload=$(cat <<JSON
-            {
-              "tag_name": "$tag_name",
-              "target_commitish": "${GITHUB_SHA}",
-              "name": "$release_name",
-              "body": "Automated release for connector $module_name built from tag $release_tag.",
-              "draft": false,
-              "prerelease": false
-            }
-            JSON
-            )
+            payload=$(printf '{"tag_name":"%s","target_commitish":"%s","name":"%s","body":"Automated release for connector %s built from tag %s.","draft":false,"prerelease":false}' "$tag_name" "${GITHUB_SHA}" "$release_name" "$module_name" "$release_tag")
 
             response=$(curl -s -o response.json -w "%{http_code}" \
               -X POST \
