@@ -173,19 +173,38 @@ jobs:
       - name: Increment Tag
         if: success() && github.event_name != 'workflow_dispatch' && env.noModulesChanged == 'false'
         id: increment_tag
+        shell: bash
         run: |
-          version=${{ steps.get_latest_release.outputs.latest }}
-          version=$(echo "$version" | tr -d '\r\n' | xargs)  # remove CR/LF e espaços
+          set -euo pipefail
+          echo "[increment_tag] Starting increment"
+          version="${{ steps.get_latest_release.outputs.latest }}"
+          echo "[increment_tag] Raw version: '$version'"
+          version="$(echo "$version" | tr -d '\r\n' | xargs || true)"
+          echo "[increment_tag] Sanitized version: '$version'"
           if [ -z "$version" ]; then
             echo "Base version is empty; check get_latest_release."
             exit 1
           fi
-          IFS='.' read -ra arr <<< "$version"
-          last_index=$((${#arr[@]} - 1))
-          last=${arr[$last_index]}
-          ((last++))
-          arr[$last_index]=$last
-          new_version=$(IFS='.'; echo "${arr[*]}")
+
+          IFS='.' read -r -a parts <<< "$version"
+          length=${#parts[@]}
+          echo "[increment_tag] Split parts (${length}): ${parts[*]}"
+          if [ "$length" -eq 0 ]; then
+            echo "Could not split version '$version'."
+            exit 1
+          fi
+
+          last_index=$((length - 1))
+          last_component="${parts[$last_index]}"
+          echo "[increment_tag] Last component before increment: '$last_component'"
+          if ! [[ "$last_component" =~ ^[0-9]+$ ]]; then
+            echo "Last component '$last_component' in version '$version' is not numeric."
+            exit 1
+          fi
+
+          parts[$last_index]=$((last_component + 1))
+          new_version=$(IFS='.'; echo "${parts[*]}")
+          echo "[increment_tag] Generated new version: $new_version"
           echo "new_tag=$new_version" >> "$GITHUB_OUTPUT"
       - name: Determine Release Tag
         if: success() && env.noModulesChanged == 'false'
