@@ -175,7 +175,11 @@ jobs:
         id: increment_tag
         run: |
           version=${{ steps.get_latest_release.outputs.latest }}
-          echo "Updating tag: $version"
+          version=$(echo "$version" | tr -d '\r\n' | xargs)  # remove CR/LF e espaços
+          if [ -z "$version" ]; then
+            echo "Base version is empty; check get_latest_release."
+            exit 1
+          fi
           IFS='.' read -ra arr <<< "$version"
           last_index=$((${#arr[@]} - 1))
           last=${arr[$last_index]}
@@ -183,7 +187,6 @@ jobs:
           arr[$last_index]=$last
           new_version=$(IFS='.'; echo "${arr[*]}")
           echo "new_tag=$new_version" >> "$GITHUB_OUTPUT"
-
       - name: Determine Release Tag
         if: success() && env.noModulesChanged == 'false'
         id: determine_release_tag
