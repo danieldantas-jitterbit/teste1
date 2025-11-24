@@ -297,16 +297,16 @@ jobs:
             echo "Creating release $release_name (tag: $tag_name)"
 
             payload=$(cat <<JSON
-{
-  "tag_name": "$tag_name",
-  "target_commitish": "${GITHUB_SHA}",
-  "name": "$release_name",
-  "body": "Automated release for connector $module_name built from tag $release_tag.",
-  "draft": false,
-  "prerelease": false
-}
-JSON
-)
+            {
+              "tag_name": "$tag_name",
+              "target_commitish": "${GITHUB_SHA}",
+              "name": "$release_name",
+              "body": "Automated release for connector $module_name built from tag $release_tag.",
+              "draft": false,
+              "prerelease": false
+            }
+            JSON
+            )
 
             response=$(curl -s -o response.json -w "%{http_code}" \
               -X POST \
