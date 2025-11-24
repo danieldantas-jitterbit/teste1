@@ -262,6 +262,70 @@ jobs:
           git tag ${{ steps.increment_tag.outputs.new_tag }}
           git push origin ${{ steps.increment_tag.outputs.new_tag }}
 
+      - name: Create GitHub Releases per Connector
+        if: success() && env.noModulesChanged == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          connectors="${{ steps.list_modules.outputs.modules }}"
+          if [ -z "$connectors" ]; then
+            connectors="${{ steps.list_modules_manual.outputs.modules }}"
+          fi
+
+          if [ -z "$connectors" ]; then
+            echo "No connectors available to create releases."
+            exit 0
+          fi
+
+          release_tag="${{ steps.determine_release_tag.outputs.value }}"
+          if [ -z "$release_tag" ]; then
+            echo "Release tag is empty. Cannot create releases."
+            exit 1
+          fi
+
+          repo="${{ github.repository }}"
+          IFS=',' read -r -a modules <<< "$connectors"
+
+          for module in "${modules[@]}"; do
+            module="$(echo "$module" | xargs)"
+            [ -z "$module" ] && continue
+            module_name="$(basename "$module")"
+            tag_name="${release_tag}-${module_name}"
+            release_name="${release_tag} - ${module_name}"
+            echo "Creating release $release_name (tag: $tag_name)"
+
+            payload=$(cat <<JSON
+{
+  "tag_name": "$tag_name",
+  "target_commitish": "${GITHUB_SHA}",
+  "name": "$release_name",
+  "body": "Automated release for connector $module_name built from tag $release_tag.",
+  "draft": false,
+  "prerelease": false
+}
+JSON
+)
+
+            response=$(curl -s -o response.json -w "%{http_code}" \
+              -X POST \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/$repo/releases" \
+              -d "$payload")
+
+            if [ "$response" -eq 201 ]; then
+              echo "Release $release_name created."
+            elif [ "$response" -eq 422 ]; then
+              echo "Release $release_name already exists. Skipping."
+            else
+              echo "Failed to create release $release_name (status $response):"
+              cat response.json
+              exit 1
+            fi
+          done
+
       - name: Tag Checkout
         id: checkout_tag
         if: github.event_name == 'workflow_dispatch'
