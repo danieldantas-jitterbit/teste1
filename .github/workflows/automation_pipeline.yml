@@ -1,0 +1,286 @@
+name: Connectors Deploy Pipeline
+
+on:
+  pull_request:
+    types: [ closed ]
+    branches:
+      - develop
+  workflow_dispatch:
+    inputs:
+      connector_release_tag:
+        description: "Connector Release/Tag (e.g., 11.34.0.7)"
+        required: true
+        type: string
+      connector_module_name:
+        description: "Connector Module path (e.g., vtex-connector or nested/path/vtex-connector)"
+        required: true
+        type: string
+
+jobs:
+  build_and_prepare:
+    name: Build Connector Images
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    outputs:
+      releaseNumbers: ${{ steps.build_docker.outputs.releaseIdentifiers }}
+      branchName: ${{ steps.list_modules.outputs.pullRequestBranch || steps.list_modules_manual.outputs.pullRequestBranch }}
+      modifiedConnectors: ${{ steps.list_modules.outputs.modifiedConnectors }}
+      modifiedConnectorsManual: ${{ steps.list_modules_manual.outputs.modifiedConnectorsManual }}
+      dockerTags: ${{ steps.build_docker.outputs.dockerTags }}
+      releaseTag: ${{ steps.determine_release_tag.outputs.value }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: List Changed Connectors
+        if: github.event_name != 'workflow_dispatch'
+        id: list_modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "🔍 Procurando conectores modificados..."
+
+          changed_files=$(git diff --name-only HEAD^ HEAD || true)
+          connector_entries=$(printf '%s\n' "$changed_files" | grep -Eo '(^|.*/)[^/]*-connector' | sed 's#^./##' | sort -u || true)
+
+          if [ -z "$connector_entries" ]; then
+            echo "⚠️ Nenhum conector modificado."
+            echo "noModulesChanged=true" >> "$GITHUB_ENV"
+            {
+              echo "modules="
+              echo "modifiedConnectors="
+              echo "pullRequestBranch=${{ github.event.pull_request.head.ref }}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          connectors=$(printf '%s\n' "$connector_entries" | tr '\n' ',' | sed 's/,$//')
+          echo "📌 Conectores alterados: $connectors"
+
+          echo "noModulesChanged=false" >> "$GITHUB_ENV"
+          {
+            echo "modules=$connectors"
+            echo "modifiedConnectors=$connectors"
+            echo "pullRequestBranch=${{ github.event.pull_request.head.ref }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify if the tag exists
+        id: check_tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          tag="${{ github.event.inputs.connector_release_tag }}"
+          if git rev-parse -q --verify "$tag" >/dev/null; then
+            echo "Tag exists: $tag"
+          else
+            echo "Error: The tag $tag does not exist."
+            exit 1
+          fi
+
+      - name: Identify changed modules (manual run)
+        id: list_modules_manual
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          module="${{ github.event.inputs.connector_module_name }}"
+          if [ -z "$module" ]; then
+            echo "You must provide at least one connector path."
+            exit 1
+          fi
+          echo "Manual connectors: $module"
+          echo "noModulesChanged=false" >> "$GITHUB_ENV"
+          {
+            echo "modules=$module"
+            echo "modifiedConnectors=$module"
+            echo "modifiedConnectorsManual=$module"
+            echo "pullRequestBranch=${GITHUB_REF}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install jq
+        if: success() && github.event_name != 'workflow_dispatch' && env.noModulesChanged == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Extract release label from PR
+        if: success() && github.event_name != 'workflow_dispatch' && env.noModulesChanged == 'false'
+        id: extract_labels
+        run: |
+          pr_number=${{ github.event.pull_request.number }}
+          repo_full_name=${{ github.repository }}
+          echo "Pull Request Number: $pr_number"
+          echo "Repository Full Name: $repo_full_name"
+
+          response=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/$repo_full_name/issues/$pr_number")
+
+          release_label=$(echo "$response" | jq -r '.labels[].name' | grep '^rel: ' || true)
+          echo "Release Label: $release_label"
+          echo "releaseLabel=$release_label" >> "$GITHUB_OUTPUT"
+
+      - name: Retrieve Latest Tag
+        if: success() && github.event_name != 'workflow_dispatch' && env.noModulesChanged == 'false'
+        id: get_latest_release
+        run: |
+          git checkout develop
+          git pull
+
+          release_label="${{ steps.extract_labels.outputs.releaseLabel }}"
+          echo "Release Label: $release_label"
+
+          if [ -z "$release_label" ]; then
+            latest_tag=$(git describe --tags $(git rev-list --tags --max-count=1))
+          else
+            release_prefix=${release_label#rel: }
+            echo "Release Prefix: $release_prefix"
+            latest_tag=$(git tag -l "${release_prefix}.*" | sort -V | tail -n 1)
+          fi
+
+          echo "Last Tag: $latest_tag"
+
+          IFS='.' read -ra components <<< "$latest_tag"
+          components[-1]=$((${components[-1]} + 1))
+          incremented_tag="${components[*]}"
+          incremented_tag=${incremented_tag// /.}
+
+          last_existing_tag=$latest_tag
+          while git rev-parse -q --verify refs/tags/$incremented_tag >/dev/null
+          do
+            last_existing_tag=$incremented_tag
+            IFS='.' read -ra components <<< "$incremented_tag"
+            components[-1]=$((${components[-1]} + 1))
+            incremented_tag="${components[*]}"
+            incremented_tag=${incremented_tag// /.}
+          done
+
+          echo "latest=$last_existing_tag" >> "$GITHUB_OUTPUT"
+          git checkout -
+
+      - name: Increment Tag
+        if: success() && github.event_name != 'workflow_dispatch' && env.noModulesChanged == 'false'
+        id: increment_tag
+        run: |
+          version=${{ steps.get_latest_release.outputs.latest }}
+          echo "Updating tag: $version"
+          IFS='.' read -ra arr <<< "$version"
+          last=${arr[-1]}
+          ((last++))
+          arr[-1]=$last
+          new_version=$(IFS='.'; echo "${arr[*]}")
+          echo "new_tag=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Determine Release Tag
+        if: success() && env.noModulesChanged == 'false'
+        id: determine_release_tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.connector_release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ steps.increment_tag.outputs.new_tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Connector Docker Images
+        if: success() && env.noModulesChanged == 'false'
+        id: build_docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          connectors="${{ steps.list_modules.outputs.modules }}"
+          if [ -z "$connectors" ]; then
+            connectors="${{ steps.list_modules_manual.outputs.modules }}"
+          fi
+
+          if [ -z "$connectors" ]; then
+            echo "No connectors were found to build."
+            echo "releaseIdentifiers=" >> "$GITHUB_OUTPUT"
+            echo "dockerTags=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          release_tag="${{ steps.determine_release_tag.outputs.value }}"
+          if [ -z "$release_tag" ]; then
+            echo "Release tag is empty."
+            exit 1
+          fi
+
+          IFS=',' read -r -a modules <<< "$connectors"
+          release_identifiers=()
+          docker_tags=()
+
+          for module in "${modules[@]}"; do
+            module="$(echo "$module" | xargs)"
+            [ -z "$module" ] && continue
+            module_path="./$module"
+            if [ ! -d "$module_path" ]; then
+              echo "Connector directory $module_path does not exist."
+              exit 1
+            fi
+
+            dockerfile="$module_path/Dockerfile"
+            if [ ! -f "$dockerfile" ]; then
+              echo "Dockerfile not found at $dockerfile"
+              exit 1
+            fi
+
+            module_name="$(basename "$module")"
+            image_tag="wevo-connectors/${module_name}:${release_tag}"
+            echo "Building $image_tag from $module_path"
+            docker build --tag "$image_tag" "$module_path"
+
+            release_identifiers+=("${release_tag}-${module_name}")
+            docker_tags+=("$image_tag")
+          done
+
+          if [ ${#release_identifiers[@]} -eq 0 ]; then
+            echo "No connectors were built."
+            exit 1
+          fi
+
+          echo "releaseIdentifiers=$(IFS=','; echo "${release_identifiers[*]}")" >> "$GITHUB_OUTPUT"
+          echo "dockerTags=$(IFS=','; echo "${docker_tags[*]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Commit New Tag
+        if: success() && github.event_name != 'workflow_dispatch' && env.noModulesChanged == 'false'
+        run: |
+          echo "Tagging with ${{ steps.increment_tag.outputs.new_tag }}"
+          git config --local user.email "${{ secrets.JITTERBOT_GITHUB_EMAIL }}"
+          git config --local user.name "Jitterbot"
+          git tag ${{ steps.increment_tag.outputs.new_tag }}
+          git push origin ${{ steps.increment_tag.outputs.new_tag }}
+
+      - name: Tag Checkout
+        id: checkout_tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git checkout develop
+          git pull
+          git checkout "${{ github.event.inputs.connector_release_tag }}"
+
+#  notifications:
+#    name: Slack Notifications
+#    runs-on: ubuntu-22.04
+#    needs:
+#      - build_and_prepare
+#    if: needs.build_and_prepare.outputs.modifiedConnectors != '' || needs.build_and_prepare.outputs.modifiedConnectorsManual != ''
+#    steps:
+#      - name: Setup Node.js environment
+#        uses: actions/setup-node@v2
+#        with:
+#          node-version: '16'
+#
+#      - name: Sending Message
+#        uses: slackapi/slack-github-action@v1.24.0
+#        env:
+#          SLACK_BOT_TOKEN: ${{ secrets.SLACK_JITTERBOT_TOKEN }}
+#        with:
+#          channel-id: CLADHKJ78
+#          slack-message: |-
+#            <!channel> Docker build completed for connector(s) ${{ needs.build_and_prepare.outputs.modifiedConnectors != '' && needs.build_and_prepare.outputs.modifiedConnectors || needs.build_and_prepare.outputs.modifiedConnectorsManual }} using release tag `${{ needs.build_and_prepare.outputs.releaseTag }}`.
+#            Built image(s): ${{ needs.build_and_prepare.outputs.dockerTags }}
+#            <https://jitterbit.atlassian.net/browse/${{ needs.build_and_prepare.outputs.branchName }}|Jira Ticket>
