@@ -133,11 +133,19 @@ jobs:
           echo "Release Label: $release_label"
 
           if [ -z "$release_label" ]; then
-            latest_tag=$(git describe --tags $(git rev-list --tags --max-count=1))
+            latest_tag=$(git describe --tags $(git rev-list --tags --max-count=1) 2>/dev/null || true)
+            if [ -z "$latest_tag" ]; then
+              echo "Nenhuma tag encontrada no repositório. Iniciando em 0.0.0.-1"
+              latest_tag="0.0.0.-1"
+            fi
           else
             release_prefix=${release_label#rel: }
             echo "Release Prefix: $release_prefix"
             latest_tag=$(git tag -l "${release_prefix}.*" | sort -V | tail -n 1)
+            if [ -z "$latest_tag" ]; then
+              echo "Nenhuma tag encontrada para $release_prefix. Criando a primeira com final .0"
+              latest_tag="${release_prefix}.-1"
+            fi
           fi
 
           echo "Last Tag: $latest_tag"
