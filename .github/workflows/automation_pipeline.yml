@@ -317,7 +317,7 @@ jobs:
             module="$(echo "$module" | xargs)"
             [ -z "$module" ] && continue
             module_name="$(basename "$module")"
-            tag_name="${release_tag}-${module_name}"
+            tag_name="${release_tag}"
             release_name="${release_tag} - ${module_name}"
             echo "Creating release $release_name (tag: $tag_name)"
 
