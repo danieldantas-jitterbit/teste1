@@ -301,17 +301,43 @@ jobs:
                         fi
 
                         echo "Querying AWS ECR for repository $repository_name (region: $region)..."
-                        if ecr_result=$(aws ecr describe-images \
+                        if ecr_tags_output=$(aws ecr describe-images \
                           --registry-id "$registry_id" \
                           --repository-name "$repository_name" \
                           --region "$region" \
-                          --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' \
+                          --query 'reverse(sort_by(imageDetails,& imagePushedAt))[*].imageTags[]' \
                           --output text); then
-                          if [ "$ecr_result" != "None" ] && [ -n "$ecr_result" ]; then
-                            resolved_placeholder="$ecr_result"
+                          resolved_placeholder=""
+                          fallback_tag=""
+                          if [ -n "$ecr_tags_output" ]; then
+                            ecr_tags_list=$(printf '%s' "$ecr_tags_output" | tr '\t' '\n')
+                            while IFS=$'\n' read -r tag; do
+                              tag="$(printf '%s' "$tag" | xargs)"
+                              [ -z "$tag" ] && continue
+                              [ "$tag" = "None" ] && continue
+                              if [ -z "$fallback_tag" ]; then
+                                fallback_tag="$tag"
+                              fi
+                              case "$tag" in
+                                *latest*) continue ;;
+                              esac
+                              if [[ "$tag" == release-* ]]; then
+                                resolved_placeholder="$tag"
+                                break
+                              fi
+                              if [ -z "$resolved_placeholder" ]; then
+                                resolved_placeholder="$tag"
+                              fi
+                            done <<< "$ecr_tags_list"
+                          fi
+
+                          if [ -z "$resolved_placeholder" ]; then
+                            resolved_placeholder="$fallback_tag"
+                          fi
+                          if [ -n "$resolved_placeholder" ]; then
                             echo "Using AWS ECR tag '$resolved_placeholder' for $repository_name"
                           else
-                            echo "Repository $repository_name does not have usable tags in AWS ECR."
+                            echo "Unable to determine a non-latest tag from AWS ECR response."
                             exit 1
                           fi
                         else
@@ -333,7 +359,7 @@ jobs:
               fi
               escaped_tag=$(printf '%s' "$resolved_placeholder" | sed 's/[&/\\]/\\&/g')
               temp_dockerfile="$(mktemp)"
-              sed "s/{__ambiente__}/$escaped_tag/g" "$dockerfile" > "$temp_dockerfile"
+              sed "s/{__ambiente__}-latest/$escaped_tag/g" "$dockerfile" > "$temp_dockerfile"
               build_file="$temp_dockerfile"
             fi
 
