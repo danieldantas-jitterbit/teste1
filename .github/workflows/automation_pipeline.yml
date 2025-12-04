@@ -250,17 +250,10 @@ jobs:
             exit 1
           fi
 
-          latest_available_tag="${{ steps.get_latest_release.outputs.latest }}"
-          if [ -z "$latest_available_tag" ]; then
-            latest_available_tag="${{ github.event.inputs.connector_release_tag }}"
-          fi
-          if [ -z "$latest_available_tag" ]; then
-            latest_available_tag="$release_tag"
-          fi
-
           IFS=',' read -r -a modules <<< "$connectors"
           release_identifiers=()
           docker_tags=()
+          logged_ecr_registries=""
 
           for module in "${modules[@]}"; do
             module="$(echo "$module" | xargs)"
@@ -283,7 +276,7 @@ jobs:
             build_file="$dockerfile"
             temp_dockerfile=""
             if grep -q "{__ambiente__}" "$dockerfile"; then
-              resolved_placeholder="$latest_available_tag"
+              resolved_placeholder=""
               placeholder_line=$(grep -m1 "{__ambiente__}" "$dockerfile" || true)
               if [ -n "$placeholder_line" ]; then
                 cleaned_prefix="${placeholder_line%%{__ambiente__}*}"
@@ -299,19 +292,37 @@ jobs:
                     region="${region_part%%.amazonaws.com}"
                     if [ -n "$registry_id" ] && [ -n "$repository_name" ] && [ -n "$region" ]; then
                       if command -v aws >/dev/null 2>&1; then
+                        login_key="$registry_host|$region"
+                        if ! printf '%s' "$logged_ecr_registries" | grep -q "|$login_key|"; then
+                          echo "Logging into AWS ECR registry $registry_host (region: $region)"
+                          if ! aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry_host"; then
+                            echo "Failed to authenticate to AWS ECR registry $registry_host"
+                            exit 1
+                          fi
+                          logged_ecr_registries="$logged_ecr_registries|$login_key|"
+                        fi
+
                         echo "Querying AWS ECR for repository $repository_name (region: $region)..."
-                        if ecr_result=$(aws ecr describe-images --registry-id "$registry_id" --repository-name "$repository_name" --region "$region" --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null); then
+                        if ecr_result=$(aws ecr describe-images \
+                          --registry-id "$registry_id" \
+                          --repository-name "$repository_name" \
+                          --region "$region" \
+                          --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' \
+                          --output text 2>/dev/null); then
                           if [ "$ecr_result" != "None" ] && [ -n "$ecr_result" ]; then
                             resolved_placeholder="$ecr_result"
                             echo "Using AWS ECR tag '$resolved_placeholder' for $repository_name"
                           else
-                            echo "Repository $repository_name does not have tags returned by AWS ECR; using '$resolved_placeholder'"
+                            echo "Repository $repository_name does not have usable tags in AWS ECR."
+                            exit 1
                           fi
                         else
-                          echo "Failed to query AWS ECR for $repository_name; continuing with '$resolved_placeholder'"
+                          echo "Failed to query AWS ECR for repository $repository_name."
+                          exit 1
                         fi
                       else
                         echo "AWS CLI is not available; unable to look up AWS ECR tags."
+                        exit 1
                       fi
                     fi
                   fi
@@ -319,7 +330,7 @@ jobs:
               fi
 
               if [ -z "$resolved_placeholder" ]; then
-                echo "No tag available to replace {__ambiente__} placeholder."
+                echo "Unable to resolve replacement for {__ambiente__} placeholder in $dockerfile."
                 exit 1
               fi
               escaped_tag=$(printf '%s' "$resolved_placeholder" | sed 's/[&/\\]/\\&/g')
