@@ -279,14 +279,12 @@ jobs:
               resolved_placeholder=""
               placeholder_line=$(grep -m1 "{__ambiente__}" "$dockerfile" || true)
               if [ -n "$placeholder_line" ]; then
-                cleaned_prefix="${placeholder_line%%{__ambiente__}*}"
-                cleaned_prefix=$(printf '%s' "$cleaned_prefix" | sed -E 's/^[[:space:]]*FROM[[:space:]]+//I')
-                cleaned_prefix=$(printf '%s' "$cleaned_prefix" | xargs)
-                cleaned_prefix="${cleaned_prefix%:}"
-                if printf '%s' "$cleaned_prefix" | grep -q '.dkr\.ecr\.'; then
-                  registry_host="${cleaned_prefix%%/*}"
-                  repository_name="${cleaned_prefix#*/}"
-                  if [ "$repository_name" != "$cleaned_prefix" ]; then
+                base_image=$(printf '%s' "$placeholder_line" | sed -E 's/^[[:space:]]*FROM[[:space:]]+//I' | xargs)
+                repository_ref=$(printf '%s' "$base_image" | sed -E 's/:\{__ambiente__\}.*$//')
+                if printf '%s' "$repository_ref" | grep -q '.dkr\.ecr\.'; then
+                  registry_host="${repository_ref%%/*}"
+                  repository_name="${repository_ref#*/}"
+                  if [ "$repository_name" != "$repository_ref" ]; then
                     registry_id="${registry_host%%.*}"
                     region_part="${registry_host#*.dkr.ecr.}"
                     region="${region_part%%.amazonaws.com}"
