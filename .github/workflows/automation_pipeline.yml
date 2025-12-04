@@ -197,7 +197,7 @@ jobs:
           last_index=$((length - 1))
           last_component="${parts[$last_index]}"
           echo "[increment_tag] Last component before increment: '$last_component'"
-          if ! [[ "$last_component" =~ ^[0-9]+$ ]]; then
+          if ! [[ "$last_component" =~ ^-?[0-9]+$ ]]; then
             echo "Last component '$last_component' in version '$version' is not numeric."
             exit 1
           fi
@@ -217,6 +217,14 @@ jobs:
           else
             echo "value=${{ steps.increment_tag.outputs.new_tag }}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Configure AWS credentials
+        if: success() && env.noModulesChanged == 'false'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || vars.AWS_REGION != '' && vars.AWS_REGION || 'us-east-1' }}
 
       - name: Build Connector Docker Images
         if: success() && env.noModulesChanged == 'false'
@@ -242,6 +250,14 @@ jobs:
             exit 1
           fi
 
+          latest_available_tag="${{ steps.get_latest_release.outputs.latest }}"
+          if [ -z "$latest_available_tag" ]; then
+            latest_available_tag="${{ github.event.inputs.connector_release_tag }}"
+          fi
+          if [ -z "$latest_available_tag" ]; then
+            latest_available_tag="$release_tag"
+          fi
+
           IFS=',' read -r -a modules <<< "$connectors"
           release_identifiers=()
           docker_tags=()
@@ -264,7 +280,59 @@ jobs:
             module_name="$(basename "$module")"
             image_tag="wevo-connectors/${module_name}:${release_tag}"
             echo "Building $image_tag from $module_path"
-            docker build --tag "$image_tag" "$module_path"
+            build_file="$dockerfile"
+            temp_dockerfile=""
+            if grep -q "{__ambiente__}" "$dockerfile"; then
+              resolved_placeholder="$latest_available_tag"
+              placeholder_line=$(grep -m1 "{__ambiente__}" "$dockerfile" || true)
+              if [ -n "$placeholder_line" ]; then
+                cleaned_prefix="${placeholder_line%%{__ambiente__}*}"
+                cleaned_prefix=$(printf '%s' "$cleaned_prefix" | sed -E 's/^[[:space:]]*FROM[[:space:]]+//I')
+                cleaned_prefix=$(printf '%s' "$cleaned_prefix" | xargs)
+                cleaned_prefix="${cleaned_prefix%:}"
+                if printf '%s' "$cleaned_prefix" | grep -q '.dkr\.ecr\.'; then
+                  registry_host="${cleaned_prefix%%/*}"
+                  repository_name="${cleaned_prefix#*/}"
+                  if [ "$repository_name" != "$cleaned_prefix" ]; then
+                    registry_id="${registry_host%%.*}"
+                    region_part="${registry_host#*.dkr.ecr.}"
+                    region="${region_part%%.amazonaws.com}"
+                    if [ -n "$registry_id" ] && [ -n "$repository_name" ] && [ -n "$region" ]; then
+                      if command -v aws >/dev/null 2>&1; then
+                        echo "Querying AWS ECR for repository $repository_name (region: $region)..."
+                        if ecr_result=$(aws ecr describe-images --registry-id "$registry_id" --repository-name "$repository_name" --region "$region" --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null); then
+                          if [ "$ecr_result" != "None" ] && [ -n "$ecr_result" ]; then
+                            resolved_placeholder="$ecr_result"
+                            echo "Using AWS ECR tag '$resolved_placeholder' for $repository_name"
+                          else
+                            echo "Repository $repository_name does not have tags returned by AWS ECR; using '$resolved_placeholder'"
+                          fi
+                        else
+                          echo "Failed to query AWS ECR for $repository_name; continuing with '$resolved_placeholder'"
+                        fi
+                      else
+                        echo "AWS CLI is not available; unable to look up AWS ECR tags."
+                      fi
+                    fi
+                  fi
+                fi
+              fi
+
+              if [ -z "$resolved_placeholder" ]; then
+                echo "No tag available to replace {__ambiente__} placeholder."
+                exit 1
+              fi
+              escaped_tag=$(printf '%s' "$resolved_placeholder" | sed 's/[&/\\]/\\&/g')
+              temp_dockerfile="$(mktemp)"
+              sed "s/{__ambiente__}/$escaped_tag/g" "$dockerfile" > "$temp_dockerfile"
+              build_file="$temp_dockerfile"
+            fi
+
+            docker build --tag "$image_tag" -f "$build_file" "$module_path"
+
+            if [ -n "$temp_dockerfile" ] && [ -f "$temp_dockerfile" ]; then
+              rm "$temp_dockerfile"
+            fi
 
             release_identifiers+=("${release_tag}-${module_name}")
             docker_tags+=("$image_tag")
