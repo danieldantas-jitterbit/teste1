@@ -306,7 +306,7 @@ jobs:
                           --repository-name "$repository_name" \
                           --region "$region" \
                           --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' \
-                          --output text 2>/dev/null); then
+                          --output text); then
                           if [ "$ecr_result" != "None" ] && [ -n "$ecr_result" ]; then
                             resolved_placeholder="$ecr_result"
                             echo "Using AWS ECR tag '$resolved_placeholder' for $repository_name"
@@ -315,7 +315,7 @@ jobs:
                             exit 1
                           fi
                         else
-                          echo "Failed to query AWS ECR for repository $repository_name."
+                          echo "Failed to query AWS ECR for repository $repository_name (region: $region). Review the AWS CLI error above."
                           exit 1
                         fi
                       else
