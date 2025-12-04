@@ -531,25 +531,25 @@ jobs:
           git pull
           git checkout "${{ github.event.inputs.connector_release_tag }}"
 
-#  notifications:
-#    name: Slack Notifications
-#    runs-on: ubuntu-22.04
-#    needs:
-#      - build_and_prepare
-#    if: needs.build_and_prepare.outputs.modifiedConnectors != '' || needs.build_and_prepare.outputs.modifiedConnectorsManual != ''
-#    steps:
-#      - name: Setup Node.js environment
-#        uses: actions/setup-node@v2
-#        with:
-#          node-version: '16'
-#
-#      - name: Sending Message
-#        uses: slackapi/slack-github-action@v1.24.0
-#        env:
-#          SLACK_BOT_TOKEN: ${{ secrets.SLACK_JITTERBOT_TOKEN }}
-#        with:
-#          channel-id: CLADHKJ78
-#          slack-message: |-
-#            <!channel> Docker build completed for connector(s) ${{ needs.build_and_prepare.outputs.modifiedConnectors != '' && needs.build_and_prepare.outputs.modifiedConnectors || needs.build_and_prepare.outputs.modifiedConnectorsManual }} using release tag `${{ needs.build_and_prepare.outputs.releaseTag }}`.
-#            Built image(s): ${{ needs.build_and_prepare.outputs.dockerTags }}
-#            <https://jitterbit.atlassian.net/browse/${{ needs.build_and_prepare.outputs.branchName }}|Jira Ticket>
+  notifications:
+    name: Slack Notifications
+    runs-on: ubuntu-22.04
+    needs:
+      - build_and_prepare
+    if: needs.build_and_prepare.outputs.modifiedConnectors != '' || needs.build_and_prepare.outputs.modifiedConnectorsManual != ''
+    steps:
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v2
+        with:
+          node-version: '16'
+
+      - name: Sending Message
+        uses: slackapi/slack-github-action@v1.24.0
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_JITTERBOT_TOKEN }}
+        with:
+          channel-id: C034ZTG4W56
+          slack-message: |-
+            <!channel> Docker build completed for connector(s) ${{ needs.build_and_prepare.outputs.modifiedConnectors != '' && needs.build_and_prepare.outputs.modifiedConnectors || needs.build_and_prepare.outputs.modifiedConnectorsManual }} using release tag `${{ needs.build_and_prepare.outputs.releaseTag }}`.
+            Built image(s): ${{ needs.build_and_prepare.outputs.dockerTags }}
+            <https://jitterbit.atlassian.net/browse/${{ needs.build_and_prepare.outputs.branchName }}|Jira Ticket>
