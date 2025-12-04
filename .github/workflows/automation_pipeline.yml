@@ -386,10 +386,10 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.determine_release_tag.outputs.value }}
-          ECR_ONE_REGISTRY: 480048582657.dkr.ecr.us-east-1.amazonaws.com
+          ECR_ONE_REGISTRY: 830972547162.dkr.ecr.us-east-1.amazonaws.com
           ECR_ONE_REPO: wevo/hubin-io-connector-v3
           ECR_ONE_REGION: us-east-1
-          ECR_TWO_REGISTRY: 830972547162.dkr.ecr.us-east-1.amazonaws.com
+          ECR_TWO_REGISTRY: 480048582657.dkr.ecr.us-east-1.amazonaws.com
           ECR_TWO_REPO: wevo/hubin-io-connector-v3
           ECR_TWO_REGION: us-east-1
           ECR_ONE_ACCESS_KEY_ID: ${{ secrets.AWS_ECR_ONE_ACCESS_KEY_ID }}
