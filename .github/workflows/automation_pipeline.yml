@@ -448,6 +448,7 @@ jobs:
             [ -z "$module" ] && continue
             module_name="$(basename "$module")"
             source_image="wevo-connectors/${module_name}:${release_tag}"
+            module_specific_tag="${module_name}-${release_tag}"
 
             if ! docker image inspect "$source_image" >/dev/null 2>&1; then
               echo "Expected image $source_image not found locally; ensure build_docker step succeeded."
@@ -455,8 +456,8 @@ jobs:
             fi
 
             echo "📤 Pushing $source_image for connector $module_name"
-            push_to_registry "$ECR_ONE_REGISTRY" "$ECR_ONE_REPO" "$ECR_ONE_REGION" "$ECR_ONE_ACCESS_KEY_ID" "$ECR_ONE_SECRET_ACCESS_KEY" "$source_image" "$release_tag"
-            push_to_registry "$ECR_TWO_REGISTRY" "$ECR_TWO_REPO" "$ECR_TWO_REGION" "$ECR_TWO_ACCESS_KEY_ID" "$ECR_TWO_SECRET_ACCESS_KEY" "$source_image" "$release_tag"
+            push_to_registry "$ECR_ONE_REGISTRY" "$ECR_ONE_REPO" "$ECR_ONE_REGION" "$ECR_ONE_ACCESS_KEY_ID" "$ECR_ONE_SECRET_ACCESS_KEY" "$source_image" "$module_specific_tag"
+            push_to_registry "$ECR_TWO_REGISTRY" "$ECR_TWO_REPO" "$ECR_TWO_REGION" "$ECR_TWO_ACCESS_KEY_ID" "$ECR_TWO_SECRET_ACCESS_KEY" "$source_image" "$module_specific_tag"
           done
 
       - name: Commit New Tag
