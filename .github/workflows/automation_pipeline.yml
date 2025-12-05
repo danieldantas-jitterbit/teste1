@@ -91,13 +91,15 @@ jobs:
             echo "You must provide at least one connector path."
             exit 1
           fi
+          branch_ref="${GITHUB_REF#refs/heads/}"
           echo "Manual connectors: $module"
+          echo "Manual branch: $branch_ref"
           echo "noModulesChanged=false" >> "$GITHUB_ENV"
           {
             echo "modules=$module"
             echo "modifiedConnectors=$module"
             echo "modifiedConnectorsManual=$module"
-            echo "pullRequestBranch=${GITHUB_REF}"
+            echo "pullRequestBranch=$branch_ref"
           } >> "$GITHUB_OUTPUT"
 
       - name: Install jq
@@ -230,6 +232,8 @@ jobs:
         if: success() && env.noModulesChanged == 'false'
         id: build_docker
         shell: bash
+        env:
+          NUGET_CONFIG_B64: ${{ secrets.NUGET_CONFIG_BASE64 }}
         run: |
           set -euo pipefail
           connectors="${{ steps.list_modules.outputs.modules }}"
@@ -275,6 +279,16 @@ jobs:
             echo "Building $image_tag from $module_path"
             build_file="$dockerfile"
             temp_dockerfile=""
+            nuget_config_path=""
+            if [ -n "${NUGET_CONFIG_B64:-}" ]; then
+              nuget_filename="NuGet.Config"
+              if grep -q "Nuget.Config" "$dockerfile"; then
+                nuget_filename="Nuget.Config"
+              fi
+              nuget_config_path="$module_path/$nuget_filename"
+              echo "Injecting $nuget_filename for $module_name"
+              printf '%s' "$NUGET_CONFIG_B64" | base64 --decode > "$nuget_config_path"
+            fi
             if grep -q "{__ambiente__}" "$dockerfile"; then
               resolved_placeholder=""
               placeholder_line=$(grep -m1 "{__ambiente__}" "$dockerfile" || true)
@@ -367,6 +381,16 @@ jobs:
 
             if [ -n "$temp_dockerfile" ] && [ -f "$temp_dockerfile" ]; then
               rm "$temp_dockerfile"
+            fi
+            if [ -n "$nuget_config_path" ] && [ -f "$nuget_config_path" ]; then
+              rm "$nuget_config_path"
+              # Also cleanup alternate casing if it exists and we created one implicitly
+              if [ "$nuget_config_path" != "$module_path/NuGet.Config" ] && [ -f "$module_path/NuGet.Config" ]; then
+                rm "$module_path/NuGet.Config"
+              fi
+              if [ "$nuget_config_path" != "$module_path/Nuget.Config" ] && [ -f "$module_path/Nuget.Config" ]; then
+                rm "$module_path/Nuget.Config"
+              fi
             fi
 
             release_identifiers+=("${release_tag}-${module_name}")
@@ -530,26 +554,3 @@ jobs:
           git checkout develop
           git pull
           git checkout "${{ github.event.inputs.connector_release_tag }}"
-
-#  notifications:
-#    name: Slack Notifications
-#    runs-on: ubuntu-22.04
-#    needs:
-#      - build_and_prepare
-#    if: needs.build_and_prepare.outputs.modifiedConnectors != '' || needs.build_and_prepare.outputs.modifiedConnectorsManual != ''
-#    steps:
-#      - name: Setup Node.js environment
-#        uses: actions/setup-node@v2
-#        with:
-#          node-version: '16'
-
-#      - name: Sending Message
-#        uses: slackapi/slack-github-action@v1.24.0
-#        env:
-#          SLACK_BOT_TOKEN: ${{ secrets.SLACK_JITTERBOT_TOKEN }}
-#        with:
-#          channel-id: C034ZTG4W56
-#          slack-message: |-
-#            <!channel> Docker build completed for connector(s) ${{ needs.build_and_prepare.outputs.modifiedConnectors != '' && needs.build_and_prepare.outputs.modifiedConnectors || needs.build_and_prepare.outputs.modifiedConnectorsManual }} using release tag `${{ needs.build_and_prepare.outputs.releaseTag }}`.
-#            Built image(s): ${{ needs.build_and_prepare.outputs.dockerTags }}
-#            <https://jitterbit.atlassian.net/browse/${{ needs.build_and_prepare.outputs.branchName }}|Jira Ticket>
