@@ -218,6 +218,14 @@ jobs:
             echo "value=${{ steps.increment_tag.outputs.new_tag }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Configure AWS credentials
+        if: success() && env.noModulesChanged == 'false'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || vars.AWS_REGION != '' && vars.AWS_REGION || 'us-east-1' }}
+
       - name: Build Connector Docker Images
         if: success() && env.noModulesChanged == 'false'
         id: build_docker
@@ -245,6 +253,7 @@ jobs:
           IFS=',' read -r -a modules <<< "$connectors"
           release_identifiers=()
           docker_tags=()
+          logged_ecr_registries=""
 
           for module in "${modules[@]}"; do
             module="$(echo "$module" | xargs)"
@@ -264,7 +273,101 @@ jobs:
             module_name="$(basename "$module")"
             image_tag="wevo-connectors/${module_name}:${release_tag}"
             echo "Building $image_tag from $module_path"
-            docker build --tag "$image_tag" "$module_path"
+            build_file="$dockerfile"
+            temp_dockerfile=""
+            if grep -q "{__ambiente__}" "$dockerfile"; then
+              resolved_placeholder=""
+              placeholder_line=$(grep -m1 "{__ambiente__}" "$dockerfile" || true)
+              if [ -n "$placeholder_line" ]; then
+                base_image=$(printf '%s' "$placeholder_line" | sed -E 's/^[[:space:]]*FROM[[:space:]]+//I' | xargs)
+                repository_ref=$(printf '%s' "$base_image" | sed -E 's/:\{__ambiente__\}.*$//')
+                if printf '%s' "$repository_ref" | grep -q '.dkr\.ecr\.'; then
+                  registry_host="${repository_ref%%/*}"
+                  repository_name="${repository_ref#*/}"
+                  if [ "$repository_name" != "$repository_ref" ]; then
+                    registry_id="${registry_host%%.*}"
+                    region_part="${registry_host#*.dkr.ecr.}"
+                    region="${region_part%%.amazonaws.com}"
+                    if [ -n "$registry_id" ] && [ -n "$repository_name" ] && [ -n "$region" ]; then
+                      if command -v aws >/dev/null 2>&1; then
+                        login_key="$registry_host|$region"
+                        if ! printf '%s' "$logged_ecr_registries" | grep -q "|$login_key|"; then
+                          echo "Logging into AWS ECR registry $registry_host (region: $region)"
+                          if ! aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry_host"; then
+                            echo "Failed to authenticate to AWS ECR registry $registry_host"
+                            exit 1
+                          fi
+                          logged_ecr_registries="$logged_ecr_registries|$login_key|"
+                        fi
+
+                        echo "Querying AWS ECR for repository $repository_name (region: $region)..."
+                        if ecr_tags_output=$(aws ecr describe-images \
+                          --registry-id "$registry_id" \
+                          --repository-name "$repository_name" \
+                          --region "$region" \
+                          --query 'reverse(sort_by(imageDetails,& imagePushedAt))[*].imageTags[]' \
+                          --output text); then
+                          resolved_placeholder=""
+                          fallback_tag=""
+                          if [ -n "$ecr_tags_output" ]; then
+                            ecr_tags_list=$(printf '%s' "$ecr_tags_output" | tr '\t' '\n')
+                            while IFS=$'\n' read -r tag; do
+                              tag="$(printf '%s' "$tag" | xargs)"
+                              [ -z "$tag" ] && continue
+                              [ "$tag" = "None" ] && continue
+                              if [ -z "$fallback_tag" ]; then
+                                fallback_tag="$tag"
+                              fi
+                              case "$tag" in
+                                *latest*) continue ;;
+                              esac
+                              if [[ "$tag" == release-* ]]; then
+                                resolved_placeholder="$tag"
+                                break
+                              fi
+                              if [ -z "$resolved_placeholder" ]; then
+                                resolved_placeholder="$tag"
+                              fi
+                            done <<< "$ecr_tags_list"
+                          fi
+
+                          if [ -z "$resolved_placeholder" ]; then
+                            resolved_placeholder="$fallback_tag"
+                          fi
+                          if [ -n "$resolved_placeholder" ]; then
+                            echo "Using AWS ECR tag '$resolved_placeholder' for $repository_name"
+                          else
+                            echo "Unable to determine a non-latest tag from AWS ECR response."
+                            exit 1
+                          fi
+                        else
+                          echo "Failed to query AWS ECR for repository $repository_name (region: $region). Review the AWS CLI error above."
+                          exit 1
+                        fi
+                      else
+                        echo "AWS CLI is not available; unable to look up AWS ECR tags."
+                        exit 1
+                      fi
+                    fi
+                  fi
+                fi
+              fi
+
+              if [ -z "$resolved_placeholder" ]; then
+                echo "Unable to resolve replacement for {__ambiente__} placeholder in $dockerfile."
+                exit 1
+              fi
+              escaped_tag=$(printf '%s' "$resolved_placeholder" | sed 's/[&/\\]/\\&/g')
+              temp_dockerfile="$(mktemp)"
+              sed "s/{__ambiente__}-latest/$escaped_tag/g" "$dockerfile" > "$temp_dockerfile"
+              build_file="$temp_dockerfile"
+            fi
+
+            docker build --tag "$image_tag" -f "$build_file" "$module_path"
+
+            if [ -n "$temp_dockerfile" ] && [ -f "$temp_dockerfile" ]; then
+              rm "$temp_dockerfile"
+            fi
 
             release_identifiers+=("${release_tag}-${module_name}")
             docker_tags+=("$image_tag")
@@ -277,6 +380,85 @@ jobs:
 
           echo "releaseIdentifiers=$(IFS=','; echo "${release_identifiers[*]}")" >> "$GITHUB_OUTPUT"
           echo "dockerTags=$(IFS=','; echo "${docker_tags[*]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Push Connector Images to AWS ECR registries
+        if: success() && env.noModulesChanged == 'false'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.determine_release_tag.outputs.value }}
+          ECR_ONE_REGISTRY: 830972547162.dkr.ecr.us-east-1.amazonaws.com
+          ECR_ONE_REPO: wevo/hubin-io-connector-v3
+          ECR_ONE_REGION: us-east-1
+          ECR_TWO_REGISTRY: 480048582657.dkr.ecr.us-east-1.amazonaws.com
+          ECR_TWO_REPO: wevo/hubin-io-connector-v3
+          ECR_TWO_REGION: us-east-1
+          ECR_ONE_ACCESS_KEY_ID: ${{ secrets.AWS_ECR_ONE_ACCESS_KEY_ID }}
+          ECR_ONE_SECRET_ACCESS_KEY: ${{ secrets.AWS_ECR_ONE_SECRET_ACCESS_KEY }}
+          ECR_TWO_ACCESS_KEY_ID: ${{ secrets.AWS_ECR_TWO_ACCESS_KEY_ID }}
+          ECR_TWO_SECRET_ACCESS_KEY: ${{ secrets.AWS_ECR_TWO_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          connectors="${{ steps.list_modules.outputs.modules }}"
+          if [ -z "$connectors" ]; then
+            connectors="${{ steps.list_modules_manual.outputs.modules }}"
+          fi
+
+          if [ -z "$connectors" ]; then
+            echo "No connectors were found to push."
+            exit 0
+          fi
+
+          release_tag="$RELEASE_TAG"
+          if [ -z "$release_tag" ]; then
+            echo "Release tag is empty; cannot push images."
+            exit 1
+          fi
+
+          if [ -z "$ECR_ONE_ACCESS_KEY_ID" ] || [ -z "$ECR_ONE_SECRET_ACCESS_KEY" ] || [ -z "$ECR_TWO_ACCESS_KEY_ID" ] || [ -z "$ECR_TWO_SECRET_ACCESS_KEY" ]; then
+            echo "One or more AWS ECR credentials are missing. Please configure AWS_ECR_ONE_* and AWS_ECR_TWO_* secrets."
+            exit 1
+          fi
+
+          push_to_registry() {
+            local registry="$1"
+            local repository="$2"
+            local region="$3"
+            local access_key="$4"
+            local secret_key="$5"
+            local source_image="$6"
+            local module_tag="$7"
+
+            target_image="${registry}/${repository}:${module_tag}"
+            echo "Tagging $source_image as $target_image"
+            docker tag "$source_image" "$target_image"
+
+            echo "Logging into $registry (region: $region)"
+            AWS_ACCESS_KEY_ID="$access_key" \
+            AWS_SECRET_ACCESS_KEY="$secret_key" \
+            AWS_DEFAULT_REGION="$region" \
+            aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry"
+
+            echo "Pushing $target_image"
+            docker push "$target_image"
+          }
+
+          IFS=',' read -r -a modules <<< "$connectors"
+          for module in "${modules[@]}"; do
+            module="$(echo "$module" | xargs)"
+            [ -z "$module" ] && continue
+            module_name="$(basename "$module")"
+            source_image="wevo-connectors/${module_name}:${release_tag}"
+            module_specific_tag="${module_name}-${release_tag}"
+
+            if ! docker image inspect "$source_image" >/dev/null 2>&1; then
+              echo "Expected image $source_image not found locally; ensure build_docker step succeeded."
+              exit 1
+            fi
+
+            echo "📤 Pushing $source_image for connector $module_name"
+            push_to_registry "$ECR_ONE_REGISTRY" "$ECR_ONE_REPO" "$ECR_ONE_REGION" "$ECR_ONE_ACCESS_KEY_ID" "$ECR_ONE_SECRET_ACCESS_KEY" "$source_image" "$module_specific_tag"
+            push_to_registry "$ECR_TWO_REGISTRY" "$ECR_TWO_REPO" "$ECR_TWO_REGION" "$ECR_TWO_ACCESS_KEY_ID" "$ECR_TWO_SECRET_ACCESS_KEY" "$source_image" "$module_specific_tag"
+          done
 
       - name: Commit New Tag
         if: success() && github.event_name != 'workflow_dispatch' && env.noModulesChanged == 'false'
@@ -360,13 +542,13 @@ jobs:
 #        uses: actions/setup-node@v2
 #        with:
 #          node-version: '16'
-#
+
 #      - name: Sending Message
 #        uses: slackapi/slack-github-action@v1.24.0
 #        env:
 #          SLACK_BOT_TOKEN: ${{ secrets.SLACK_JITTERBOT_TOKEN }}
 #        with:
-#          channel-id: CLADHKJ78
+#          channel-id: C034ZTG4W56
 #          slack-message: |-
 #            <!channel> Docker build completed for connector(s) ${{ needs.build_and_prepare.outputs.modifiedConnectors != '' && needs.build_and_prepare.outputs.modifiedConnectors || needs.build_and_prepare.outputs.modifiedConnectorsManual }} using release tag `${{ needs.build_and_prepare.outputs.releaseTag }}`.
 #            Built image(s): ${{ needs.build_and_prepare.outputs.dockerTags }}
