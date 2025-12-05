@@ -493,7 +493,7 @@ jobs:
           git tag ${{ steps.increment_tag.outputs.new_tag }}
           git push origin ${{ steps.increment_tag.outputs.new_tag }}
 
-      - name: Create GitHub Releases per Connector
+      - name: Create GitHub Releases
         if: success() && env.noModulesChanged == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -519,33 +519,55 @@ jobs:
           repo="${{ github.repository }}"
           IFS=',' read -r -a modules <<< "$connectors"
 
+          module_names=()
           for module in "${modules[@]}"; do
             module="$(echo "$module" | xargs)"
             [ -z "$module" ] && continue
-            module_name="$(basename "$module")"
-            tag_name="${release_tag}"
-            release_name="${release_tag} - ${module_name}"
-            echo "Creating release $release_name (tag: $tag_name)"
-
-            payload=$(printf '{"tag_name":"%s","target_commitish":"%s","name":"%s","body":"Automated release for connector %s built from tag %s.","draft":false,"prerelease":false}' "$tag_name" "${GITHUB_SHA}" "$release_name" "$module_name" "$release_tag")
-
-            response=$(curl -s -o response.json -w "%{http_code}" \
-              -X POST \
-              -H "Authorization: token $GITHUB_TOKEN" \
-              -H "Content-Type: application/json" \
-              "https://api.github.com/repos/$repo/releases" \
-              -d "$payload")
-
-            if [ "$response" -eq 201 ]; then
-              echo "Release $release_name created."
-            elif [ "$response" -eq 422 ]; then
-              echo "Release $release_name already exists. Skipping."
-            else
-              echo "Failed to create release $release_name (status $response):"
-              cat response.json
-              exit 1
-            fi
+            module_names+=("$(basename "$module")")
           done
+
+          if [ ${#module_names[@]} -eq 0 ]; then
+            echo "No connectors available to create releases after filtering."
+            exit 0
+          fi
+
+          tag_name="${release_tag}"
+          if [ ${#module_names[@]} -eq 1 ]; then
+            module_name="${module_names[0]}"
+            release_name="${release_tag} - ${module_name}"
+            release_body=$(printf 'Automated release for connector %s built from tag %s.' "$module_name" "$release_tag")
+          else
+            release_name="${release_tag} - multiple connectors"
+            connector_list=""
+            for name in "${module_names[@]}"; do
+              if [ -n "$connector_list" ]; then
+                connector_list+=", "
+              fi
+              connector_list+="$name"
+            done
+            release_body=$(printf 'Automated release for connectors built from tag %s. Connectors: %s.' "$release_tag" "$connector_list")
+          fi
+
+          echo "Creating release $release_name (tag: $tag_name)"
+
+          payload=$(printf '{"tag_name":"%s","target_commitish":"%s","name":"%s","body":"%s","draft":false,"prerelease":false}' "$tag_name" "${GITHUB_SHA}" "$release_name" "$release_body")
+
+          response=$(curl -s -o response.json -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/$repo/releases" \
+            -d "$payload")
+
+          if [ "$response" -eq 201 ]; then
+            echo "Release $release_name created."
+          elif [ "$response" -eq 422 ]; then
+            echo "Release $release_name already exists. Skipping."
+          else
+            echo "Failed to create release $release_name (status $response):"
+            cat response.json
+            exit 1
+          fi
 
       - name: Tag Checkout
         id: checkout_tag
