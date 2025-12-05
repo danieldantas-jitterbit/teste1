@@ -19,7 +19,7 @@ WORKDIR /src
 ##COPY . .
 ##WORKDIR "/src/src/${ConectorSolution}"
 ##RUN dotnet build "${ConectorSolution}.csproj" -c Release-Kubernetes -o /app/build#
-##Conector
+##Conectorx
 #FROM build_conector AS publish_conector
 #RUN dotnet publish "${ConectorSolution}.csproj" -c Release-Kubernetes -o /app/publish
 
