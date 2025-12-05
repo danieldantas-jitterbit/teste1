@@ -91,13 +91,15 @@ jobs:
             echo "You must provide at least one connector path."
             exit 1
           fi
+          branch_ref="${GITHUB_REF#refs/heads/}"
           echo "Manual connectors: $module"
+          echo "Manual branch: $branch_ref"
           echo "noModulesChanged=false" >> "$GITHUB_ENV"
           {
             echo "modules=$module"
             echo "modifiedConnectors=$module"
             echo "modifiedConnectorsManual=$module"
-            echo "pullRequestBranch=${GITHUB_REF}"
+            echo "pullRequestBranch=$branch_ref"
           } >> "$GITHUB_OUTPUT"
 
       - name: Install jq
@@ -230,6 +232,8 @@ jobs:
         if: success() && env.noModulesChanged == 'false'
         id: build_docker
         shell: bash
+        env:
+          NUGET_CONFIG_B64: ${{ secrets.NUGET_CONFIG_BASE64 }}
         run: |
           set -euo pipefail
           connectors="${{ steps.list_modules.outputs.modules }}"
@@ -275,6 +279,16 @@ jobs:
             echo "Building $image_tag from $module_path"
             build_file="$dockerfile"
             temp_dockerfile=""
+            nuget_config_path=""
+            if [ -n "${NUGET_CONFIG_B64:-}" ]; then
+              nuget_filename="NuGet.Config"
+              if grep -q "Nuget.Config" "$dockerfile"; then
+                nuget_filename="Nuget.Config"
+              fi
+              nuget_config_path="$module_path/$nuget_filename"
+              echo "Injecting $nuget_filename for $module_name"
+              printf '%s' "$NUGET_CONFIG_B64" | base64 --decode > "$nuget_config_path"
+            fi
             if grep -q "{__ambiente__}" "$dockerfile"; then
               resolved_placeholder=""
               placeholder_line=$(grep -m1 "{__ambiente__}" "$dockerfile" || true)
@@ -367,6 +381,16 @@ jobs:
 
             if [ -n "$temp_dockerfile" ] && [ -f "$temp_dockerfile" ]; then
               rm "$temp_dockerfile"
+            fi
+            if [ -n "$nuget_config_path" ] && [ -f "$nuget_config_path" ]; then
+              rm "$nuget_config_path"
+              # Also cleanup alternate casing if it exists and we created one implicitly
+              if [ "$nuget_config_path" != "$module_path/NuGet.Config" ] && [ -f "$module_path/NuGet.Config" ]; then
+                rm "$module_path/NuGet.Config"
+              fi
+              if [ "$nuget_config_path" != "$module_path/Nuget.Config" ] && [ -f "$module_path/Nuget.Config" ]; then
+                rm "$module_path/Nuget.Config"
+              fi
             fi
 
             release_identifiers+=("${release_tag}-${module_name}")
@@ -469,7 +493,7 @@ jobs:
           git tag ${{ steps.increment_tag.outputs.new_tag }}
           git push origin ${{ steps.increment_tag.outputs.new_tag }}
 
-      - name: Create GitHub Releases per Connector
+      - name: Create GitHub Releases
         if: success() && env.noModulesChanged == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -495,33 +519,55 @@ jobs:
           repo="${{ github.repository }}"
           IFS=',' read -r -a modules <<< "$connectors"
 
+          module_names=()
           for module in "${modules[@]}"; do
             module="$(echo "$module" | xargs)"
             [ -z "$module" ] && continue
-            module_name="$(basename "$module")"
-            tag_name="${release_tag}"
-            release_name="${release_tag} - ${module_name}"
-            echo "Creating release $release_name (tag: $tag_name)"
-
-            payload=$(printf '{"tag_name":"%s","target_commitish":"%s","name":"%s","body":"Automated release for connector %s built from tag %s.","draft":false,"prerelease":false}' "$tag_name" "${GITHUB_SHA}" "$release_name" "$module_name" "$release_tag")
-
-            response=$(curl -s -o response.json -w "%{http_code}" \
-              -X POST \
-              -H "Authorization: token $GITHUB_TOKEN" \
-              -H "Content-Type: application/json" \
-              "https://api.github.com/repos/$repo/releases" \
-              -d "$payload")
-
-            if [ "$response" -eq 201 ]; then
-              echo "Release $release_name created."
-            elif [ "$response" -eq 422 ]; then
-              echo "Release $release_name already exists. Skipping."
-            else
-              echo "Failed to create release $release_name (status $response):"
-              cat response.json
-              exit 1
-            fi
+            module_names+=("$(basename "$module")")
           done
+
+          if [ ${#module_names[@]} -eq 0 ]; then
+            echo "No connectors available to create releases after filtering."
+            exit 0
+          fi
+
+          tag_name="${release_tag}"
+          if [ ${#module_names[@]} -eq 1 ]; then
+            module_name="${module_names[0]}"
+            release_name="${release_tag} - ${module_name}"
+            release_body=$(printf 'Automated release for connector %s built from tag %s.' "$module_name" "$release_tag")
+          else
+            release_name="${release_tag} - multiple connectors"
+            connector_list=""
+            for name in "${module_names[@]}"; do
+              if [ -n "$connector_list" ]; then
+                connector_list+=", "
+              fi
+              connector_list+="$name"
+            done
+            release_body=$(printf 'Automated release for connectors built from tag %s. Connectors: %s.' "$release_tag" "$connector_list")
+          fi
+
+          echo "Creating release $release_name (tag: $tag_name)"
+
+          payload=$(printf '{"tag_name":"%s","target_commitish":"%s","name":"%s","body":"%s","draft":false,"prerelease":false}' "$tag_name" "${GITHUB_SHA}" "$release_name" "$release_body")
+
+          response=$(curl -s -o response.json -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/$repo/releases" \
+            -d "$payload")
+
+          if [ "$response" -eq 201 ]; then
+            echo "Release $release_name created."
+          elif [ "$response" -eq 422 ]; then
+            echo "Release $release_name already exists. Skipping."
+          else
+            echo "Failed to create release $release_name (status $response):"
+            cat response.json
+            exit 1
+          fi
 
       - name: Tag Checkout
         id: checkout_tag
@@ -530,26 +576,3 @@ jobs:
           git checkout develop
           git pull
           git checkout "${{ github.event.inputs.connector_release_tag }}"
-
-#  notifications:
-#    name: Slack Notifications
-#    runs-on: ubuntu-22.04
-#    needs:
-#      - build_and_prepare
-#    if: needs.build_and_prepare.outputs.modifiedConnectors != '' || needs.build_and_prepare.outputs.modifiedConnectorsManual != ''
-#    steps:
-#      - name: Setup Node.js environment
-#        uses: actions/setup-node@v2
-#        with:
-#          node-version: '16'
-
-#      - name: Sending Message
-#        uses: slackapi/slack-github-action@v1.24.0
-#        env:
-#          SLACK_BOT_TOKEN: ${{ secrets.SLACK_JITTERBOT_TOKEN }}
-#        with:
-#          channel-id: C034ZTG4W56
-#          slack-message: |-
-#            <!channel> Docker build completed for connector(s) ${{ needs.build_and_prepare.outputs.modifiedConnectors != '' && needs.build_and_prepare.outputs.modifiedConnectors || needs.build_and_prepare.outputs.modifiedConnectorsManual }} using release tag `${{ needs.build_and_prepare.outputs.releaseTag }}`.
-#            Built image(s): ${{ needs.build_and_prepare.outputs.dockerTags }}
-#            <https://jitterbit.atlassian.net/browse/${{ needs.build_and_prepare.outputs.branchName }}|Jira Ticket>
